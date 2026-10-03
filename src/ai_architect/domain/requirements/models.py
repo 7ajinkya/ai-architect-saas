@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
+from enum import Enum
 
 class AdditionalRequirement(BaseModel):
     name: str
@@ -34,12 +35,19 @@ class Assumption(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+class RequirementImpact(str, Enum):
+    ARCHITECTURE = "architecture"
+    SIZING = "sizing"
+    COMPLIANCE = "compliance"
+    PREFERENCE = "preference"
+    UNKNOWN = "unknown"
 
 class ClarificationCandidate(BaseModel):
+    requirement_key: str = ""
     requirement: str = ""
     question: str = ""
     reason: str = ""
-
+    impact: RequirementImpact = RequirementImpact.UNKNOWN
     model_config = ConfigDict(extra="forbid")
 
 
@@ -174,6 +182,21 @@ class RequirementsSpec(BaseModel):
 
     managed_service_preference: RequirementValue = Field(
         default_factory=RequirementValue
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+class ValidationStatus(str, Enum):
+    READY = "ready"
+    NEEDS_CLARIFICATION = "needs_clarification"
+
+class ValidationResult(BaseModel):
+    status: ValidationStatus
+    blocking_clarifications: list[ClarificationCandidate] = Field(
+        default_factory=list
+    )
+    accepted_assumptions: list[Assumption] = Field(
+        default_factory=list
     )
 
     model_config = ConfigDict(extra="forbid")

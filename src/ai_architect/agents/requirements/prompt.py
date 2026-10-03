@@ -152,37 +152,128 @@ evidence = "5 Mbps average bitrate"
 ASSUMPTIONS
 ==================================================
 
-You may propose assumptions for missing information that primarily affects
-sizing and can reasonably be adjusted later.
+An assumption is NOT merely a statement that information is missing.
 
-Examples include:
+Only create an assumption when:
+1. The missing information primarily affects sizing or capacity.
+2. A reasonable default value can be established.
+3. The value can be adjusted later.
+
+For every assumption, you MUST provide a concrete default value.
+
+Examples:
 
 - messages per user per day
-- media attachment ratio
-- peak-to-average traffic ratio
-- similar workload sizing parameters
+  value = "40"
+  unit = "messages/user/day"
 
-Do NOT invent assumptions for requirements that could materially change
-the architecture.
+- media attachment ratio
+  value = "10"
+  unit = "percent"
+
+- peak-to-average traffic ratio
+  value = "5"
+  unit = "ratio"
+
+Do NOT create an assumption whose value is merely:
+- "unknown"
+- "not specified"
+- "missing"
+- "TBD"
+
+Do NOT create an assumption just to describe missing information.
+
+For example, this is INVALID:
+
+{
+  "description": "Average messages per user per day not specified"
+}
+
+Instead, either:
+
+1. Create a concrete sizing assumption:
+
+{
+  "name": "messages per user per day",
+  "value": "40",
+  "unit": "messages/user/day",
+  "source": "assumption",
+  "rationale": "Reasonable default for messaging workload sizing"
+}
+
+OR
+
+2. If no reasonable default can be established, create a clarification candidate.
+
+Architecture-changing requirements must NOT be represented as assumptions.
 
 Examples include:
-
 - real-time voice/video communication
-- data residency requirements
+- data residency
 - major compliance requirements
 - fundamentally different workload types
 
-Those should instead be represented as clarification_candidates.
+Those belong in clarification_candidates.
 
-Every assumption must be clearly marked with:
-
+Every assumption must use:
 source = "assumption"
 
-Never represent an assumption as user-provided.
+Never represent a missing requirement as an assumption without a concrete default value.
 
 ==================================================
 CLARIFICATION CANDIDATES
 ==================================================
+
+Create a clarification candidate when an important requirement is missing
+and either:
+
+1. It could materially affect architecture, compliance, workload type,
+   or another major design decision.
+
+OR
+
+2. A reasonable default cannot be established.
+
+For every clarification candidate, provide:
+
+- requirement
+- question
+- reason
+- impact
+
+The impact MUST be exactly one of:
+
+- architecture
+- sizing
+- compliance
+- preference
+- unknown
+
+For every clarification candidate, provide a requirement_key identifying
+the canonical requirement field that the clarification refers to.
+
+The requirement_key must correspond to an existing RequirementsExtraction
+field whenever the clarification maps to one.
+
+Examples:
+- geographic deployment region -> region
+- availability target -> availability
+- latency expectations -> latency
+- deployment scope -> deployment_scope
+- retention policy -> retention
+- read/write characteristics -> read_write_characteristics
+- managed service preference -> managed_service_preference
+- cloud provider -> cloud_provider
+
+Do not invent new requirement keys when an existing requirement field applies.
+The requirement_key is a machine-readable identifier and must remain stable
+even if the human-readable requirement or question wording changes.
+
+Do NOT use clarification_candidates merely to report that a sizing
+parameter is missing if a reasonable default can be established.
+
+The application validator, not the LLM, makes the final decision about
+whether a clarification is blocking.
 
 Use clarification_candidates only when missing information could materially
 affect architecture.
@@ -192,6 +283,36 @@ Each candidate should contain:
 requirement
 question
 reason
+
+Identify missing requirements that may need clarification.
+
+For each clarification candidate, classify its impact:
+
+- architecture:
+  The missing requirement could materially change the architecture,
+  workload type, major components, or system design.
+
+- sizing:
+  The missing requirement primarily affects capacity, throughput,
+  storage,
+  traffic, or other sizing calculations and can reasonably be
+  represented by an editable assumption.
+
+- compliance:
+  The missing requirement concerns regulatory, data residency,
+  or other compliance obligations.
+
+- preference:
+  The missing requirement mainly reflects a user preference or
+  implementation preference.
+
+- unknown:
+  Use this when the impact cannot be determined confidently.
+
+Do NOT decide whether a clarification is ultimately blocking.
+The application validator makes that decision deterministically.
+
+Do not invent numerical values merely to avoid a clarification.
 
 Example:
 
