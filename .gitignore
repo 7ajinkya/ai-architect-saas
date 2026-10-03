@@ -28,3 +28,12 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Local runtime / databases
+*.sqlite
+*.sqlite3
+*.db
+
+# Local downloaded / generated knowledge data
+data/
+audit_sources/

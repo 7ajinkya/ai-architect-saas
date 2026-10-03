@@ -27,3 +27,5 @@ class CapacityModelResult(BaseModel):
     egress_bytes_per_second: float
 
     formula_version: str
+
+    calculation_trace: dict[str, str]
