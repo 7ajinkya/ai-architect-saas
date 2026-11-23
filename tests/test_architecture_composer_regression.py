@@ -161,7 +161,7 @@ def _observed_shape() -> dict:
         ],
         "decisions": [
             {
-                "alternatives_considered": "None, as component selection fixed.",
+                "alternatives_considered": [],
                 "description": "Use API Gateway WebSocket as the entry point.",
                 "id": "decision-1",
                 "rationale": "Managed bidirectional sync; supported by ev-1.",
@@ -188,6 +188,27 @@ def _observed_shape() -> dict:
                 "kind": "write",
                 "protocol": "",
                 "to": "Amazon Simple Storage Service",
+            },
+            {
+                "description": "Persist board metadata.",
+                "from": "AWS Lambda",
+                "kind": "write",
+                "protocol": "",
+                "to": "Amazon DynamoDB",
+            },
+            {
+                "description": "Serve snapshot assets.",
+                "from": "Amazon CloudFront",
+                "kind": "read",
+                "protocol": "",
+                "to": "Amazon Simple Storage Service",
+            },
+            {
+                "description": "Authorize collaboration sessions.",
+                "from": "Amazon Cognito",
+                "kind": "control",
+                "protocol": "",
+                "to": "Amazon API Gateway",
             },
         ],
         "entry_points": ["Amazon API Gateway"],
@@ -460,7 +481,32 @@ class ComposerRegressionTests(unittest.TestCase):
         # not carried into the artifact.
         shape = _observed_shape()
         shape["decisions"][0]["alternatives_considered"] = [
-            "Amazon ElastiCache instead of DynamoDB"
+            {"component_ref": "Amazon ElastiCache",
+             "note": "instead of DynamoDB"}
+        ]
+        parsed = ArchitectureLLMOutput.model_validate(shape)
+        up = _upstream()
+        with self.assertRaises(ValueError) as ctx:
+            run_module.normalize_architecture(
+                parsed,
+                extraction=up["extraction"],
+                capacity=up["capacity"],
+                selection=up["selection"],
+                cost=up["cost"],
+                region_code=REGION,
+                requirements_session_id=REQ_SESSION,
+                design_session_id=DESIGN_SESSION,
+                provider=PROVIDER,
+            )
+        self.assertIn("unknown component", str(ctx.exception).lower())
+
+    def test_12b_smuggled_service_in_note_still_rejected(self):
+        # A generic-shaped alternative whose note sneaks in an unknown
+        # provider service must still fail at the validator boundary.
+        shape = _observed_shape()
+        shape["decisions"][0]["alternatives_considered"] = [
+            {"component_ref": "",
+             "note": "Amazon ElastiCache instead of DynamoDB"}
         ]
         parsed = ArchitectureLLMOutput.model_validate(shape)
         up = _upstream()
@@ -766,10 +812,12 @@ class ComposerRegressionTests(unittest.TestCase):
 
 
     def test_21_correction_retry_lists_allowed_vocabulary(self):
-        bad = ArchitectureLLMOutput.model_validate(_observed_shape())
-        bad.decisions[0].alternatives_considered = [
-            "Amazon ElastiCache instead of DynamoDB"
+        shape = _observed_shape()
+        shape["decisions"][0]["alternatives_considered"] = [
+            {"component_ref": "Amazon ElastiCache",
+             "note": "instead of DynamoDB"}
         ]
+        bad = ArchitectureLLMOutput.model_validate(shape)
 
         class _AlwaysBad:
             def __init__(self):
@@ -883,40 +931,65 @@ class ComposerFailurePairRegressionTests(unittest.TestCase):
         self.assertIn("capacity linkage", message)
 
     def test_R2_closed_world_retry_mentions_rejected(self):
-        # Retry from the smoke test: six provider-led service mentions
+        # Retry from the smoke test: provider-led service mentions
         # outside the selected AND rejected sets. S3 is excluded from
-        # the selection here so the two S3 mentions stay out-of-vocabulary
-        # exactly as in the failed run.
+        # the selection here so the S3 mentions stay out-of-vocabulary
+        # exactly as in the failed run. Structured refs fail fast at
+        # normalize with "unknown component"; each fragment is checked.
+        for fragment, ref in (
+            ("app runner", "AWS App Runner"),
+            ("fargate", "AWS Fargate"),
+            ("ec2", "Amazon EC2"),
+            ("aurora", "Amazon Aurora Serverless"),
+            ("s3 static", "Amazon S3 static mapping"),
+            ("global accelerator", "AWS Global Accelerator"),
+        ):
+            with self.subTest(fragment=fragment):
+                shape = _shape_no_s3()
+                shape["decisions"] = [
+                    {
+                        "decision": "Run sync handlers on Lambda.",
+                        "rationale": "Event-driven scale; supported by ev-1.",
+                        "alternatives_considered": [
+                            {"component_ref": ref,
+                             "note": "considered for this decision"},
+                        ],
+                    },
+                ]
+                parsed = ArchitectureLLMOutput.model_validate(shape)
+                sel = _selection_no_s3()
+                up = _upstream()
+                with self.assertRaises(ValueError) as ctx:
+                    run_module.normalize_architecture(
+                        parsed,
+                        extraction=up["extraction"],
+                        capacity=up["capacity"],
+                        selection=sel,
+                        cost=up["cost"],
+                        region_code=REGION,
+                        requirements_session_id=REQ_SESSION,
+                        design_session_id=DESIGN_SESSION,
+                        provider=PROVIDER,
+                    )
+                message = str(ctx.exception).lower()
+                self.assertIn("unknown component", message)
+                self.assertIn(fragment, message)
+
+    def test_R2b_note_smuggled_services_still_rejected(self):
+        # The exact historical failure pattern (s3 static website +
+        # global accelerator) expressed as generic notes must still be
+        # rejected by the validator boundary.
         shape = _shape_no_s3()
         shape["decisions"] = [
             {
-                "decision": "Use API Gateway WebSocket as the entry point.",
-                "rationale": "Managed bidirectional sync; supported by ev-1.",
-                "alternatives_considered": [
-                    "AWS App Runner instead of the gateway",
-                    "a managed cache for session state",
-                ],
-            },
-            {
-                "decision": "Run sync handlers on Lambda.",
-                "rationale": "Event-driven scale; supported by ev-1.",
-                "alternatives_considered": [
-                    "AWS Fargate for long-lived handlers",
-                    "Amazon EC2 with auto scaling",
-                ],
-            },
-            {
-                "decision": "Persist board state in DynamoDB.",
-                "rationale": "Key-value access; supported by ev-2.",
-                "alternatives_considered": [
-                    "Amazon Aurora Serverless for relational queries",
-                    "Amazon S3 static mapping for snapshots",
-                ],
-            },
-            {
-                "decision": "Host public assets via Amazon S3 website hosting.",
+                "decision": "Serve static assets at the edge.",
                 "rationale": "Static delivery; supported by ev-4.",
-                "alternatives_considered": ["CloudFront caching in front"],
+                "alternatives_considered": [
+                    {"component_ref": "",
+                     "note": "amazon s3 static website for asset hosting"},
+                    {"component_ref": "",
+                     "note": "aws global accelerator for anycast ingress"},
+                ],
             },
         ]
         parsed = ArchitectureLLMOutput.model_validate(shape)
@@ -935,12 +1008,9 @@ class ComposerFailurePairRegressionTests(unittest.TestCase):
                 provider=PROVIDER,
             )
         message = str(ctx.exception).lower()
-        self.assertEqual(message.count("outside the selected"), 6)
-        for fragment in (
-            "app runner", "fargate", "ec2", "aurora",
-            "s3 static", "s3 website",
-        ):
-            self.assertIn(fragment, message)
+        self.assertEqual(message.count("outside the selected"), 2)
+        self.assertIn("s3 static", message)
+        self.assertIn("global accelerator", message)
 
     def test_R3_double_failure_carries_structured_diagnostics(self):
         # Both rejected payloads plus both validator error strings must
@@ -956,7 +1026,8 @@ class ComposerFailurePairRegressionTests(unittest.TestCase):
                 "decision": "Run sync handlers on Lambda.",
                 "rationale": "Event-driven scale.",
                 "alternatives_considered": [
-                    "AWS Fargate for long-lived handlers"
+                    {"component_ref": "AWS Fargate",
+                     "note": "for long-lived handlers"}
                 ],
             },
         ]
@@ -1017,7 +1088,7 @@ class ComposerFailurePairRegressionTests(unittest.TestCase):
             json.dumps(entry)
         self.assertIn("states throughput", diagnostics[0]["errors"][0].lower())
         self.assertIn(
-            "outside the selected", diagnostics[1]["errors"][0].lower()
+            "unknown component", diagnostics[1]["errors"][0].lower()
         )
         self.assertIn(
             "5200 requests/s",

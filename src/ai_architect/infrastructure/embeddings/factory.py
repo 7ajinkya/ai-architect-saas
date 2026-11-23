@@ -15,6 +15,8 @@ def create_embeddings():
 
     if provider == "ollama":
         from langchain_ollama import OllamaEmbeddings
-        return OllamaEmbeddings(model=model, base_url=settings.ollama_base_url)
+        return OllamaEmbeddings(
+            model=model, base_url=settings.ai_architect_ollama_base_url
+        )
 
     raise ValueError(f"Unsupported embedding provider: {provider}")

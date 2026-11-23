@@ -14,6 +14,21 @@ class AdditionalRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AssumptionConfidence(str, Enum):
+    """
+    Bounded confidence vocabulary for a recorded assumption.
+
+    UNSPECIFIED is the empty value: the assumption makes no confidence
+    claim. The graded levels mirror the system-wide high/medium/low
+    confidence vocabulary.
+    """
+
+    UNSPECIFIED = ""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class Assumption(BaseModel):
     """
     A value proposed by the agent because the user did not explicitly
@@ -32,6 +47,7 @@ class Assumption(BaseModel):
     source: str = "assumption"
     evidence: str = ""
     rationale: str = ""
+    confidence: AssumptionConfidence = AssumptionConfidence.UNSPECIFIED
 
     model_config = ConfigDict(extra="forbid")
 

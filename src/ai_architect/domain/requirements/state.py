@@ -1,8 +1,9 @@
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ai_architect.domain.requirements.models import (
+    AdditionalRequirement,
     ClarificationCandidate,
     RequirementImpact,
     RequirementsExtraction,
@@ -94,6 +95,30 @@ class RequirementsState(BaseModel):
             status=status,
         )
 
+    @classmethod
+    def ensure(
+        cls,
+        value: "RequirementsState | dict",
+    ) -> "RequirementsState":
+        """Reconstruct typed state at the domain boundary.
+
+        Checkpoint deserialization falls back to unvalidated construction
+        when stored data fails validation, which leaves dict innards that
+        later explode as AttributeError (e.g. 'dict' object has no
+        attribute 'status'). Revalidating here turns that into a clear
+        failure instead of silent corruption downstream, and guarantees
+        validation_result stays a real ValidationResult instance.
+        """
+        if isinstance(value, cls):
+            value = value.model_dump(mode="python")
+        try:
+            return cls.model_validate(value)
+        except ValidationError as e:
+            raise ValueError(
+                "Stored requirements state failed validation and cannot "
+                f"be safely reconstructed: {e}"
+            ) from e
+
     def answer_clarification(
         self,
         clarification_id: str,
@@ -108,16 +133,38 @@ class RequirementsState(BaseModel):
             if item.id != clarification_id:
                 continue
 
-            if not hasattr(self.extraction, item.requirement_key):
+            field = RequirementsExtraction.model_fields.get(
+                item.requirement_key
+            )
+            if field is None:
                 raise ValueError(
                     f"Unsupported requirement key: {item.requirement_key}"
                 )
 
-            setattr(
-                self.extraction,
-                item.requirement_key,
-                answer,
-            )
+            if item.requirement_key == "additional_requirements":
+                # A free-text answer must never be assigned raw to a list
+                # field (pydantic does not validate on assignment, which
+                # silently corrupts the model and breaks checkpoint
+                # serialization). Structure it with the existing schema.
+                self.extraction.additional_requirements.append(
+                    AdditionalRequirement(
+                        name=item.requirement or item.requirement_key,
+                        value=answer,
+                        source="user_provided",
+                        evidence=answer,
+                    )
+                )
+            elif field.annotation is str:
+                setattr(
+                    self.extraction,
+                    item.requirement_key,
+                    answer,
+                )
+            else:
+                raise ValueError(
+                    "Cannot apply a free-text answer to non-scalar field "
+                    f"{item.requirement_key!r}."
+                )
 
             item.answer = answer
             item.status = ClarificationStatus.ANSWERED

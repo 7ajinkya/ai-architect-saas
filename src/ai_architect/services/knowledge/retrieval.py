@@ -14,6 +14,7 @@ from ai_architect.services.knowledge.contracts import (
     EvidenceAuthority,
 )
 from ai_architect.services.knowledge.providers.qdrant_provider import QdrantProvider
+from ai_architect.services.knowledge.providers.aws_provider import AWSProvider
 
 
 # Backward compatibility: old RetrievedChunk format
@@ -47,11 +48,46 @@ class RetrievalService:
 
     def __init__(self):
         self.providers = {}
-        self._init_providers()
+        self._providers_initialized = False
+        self._ensure_providers_initialized()
 
-    def _init_providers(self):
-        """Initialize available knowledge providers."""
-        self.providers["qdrant-indexed"] = QdrantProvider()
+    def _ensure_providers_initialized(self):
+        """Lazy initialization of providers.
+
+        Each provider is constructed defensively: several providers
+        perform I/O in their constructors (e.g. the Qdrant provider
+        verifies its collection on connect), and an unreachable
+        dependency must degrade to "provider unavailable" — the same
+        outcome as a retrieve-time failure — rather than aborting the
+        whole retrieval with a connection error.
+        """
+        if self._providers_initialized:
+            return
+        for provider_id, factory in (
+            ("qdrant-indexed", QdrantProvider),
+            ("aws-mcp", AWSProvider),
+        ):
+            try:
+                self.providers[provider_id] = factory()
+            except Exception as e:
+                print(
+                    f"Warning: Provider {provider_id} initialization "
+                    f"failed: {e}"
+                )
+        self._providers_initialized = True
+
+    async def _ensure_provider_available(self, provider_id: str) -> bool:
+        """Ensure a provider is initialized and available."""
+        provider = self.providers.get(provider_id)
+        if not provider:
+            return False
+        if not provider.is_available():
+            try:
+                await provider.initialize()
+            except Exception as e:
+                print(f"Warning: Provider {provider_id} initialization failed: {e}")
+                return False
+        return provider.is_available()
 
     def register_provider(self, provider_id: str, provider):
         """Register a new knowledge provider."""
@@ -65,7 +101,7 @@ class RetrievalService:
         """List available provider IDs."""
         return list(self.providers.keys())
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         top_k: int = 5,
@@ -88,6 +124,8 @@ class RetrievalService:
 
         if filters is None:
             filters = RetrievalFilters()
+        elif isinstance(filters, dict):
+            filters = RetrievalFilters(**filters)
 
         # Determine which providers to query
         target_providers = provider_ids or list(self.providers.keys())
@@ -95,14 +133,14 @@ class RetrievalService:
         builder = EvidenceBundleBuilder().with_query(query).with_filters(filters)
 
         for provider_id in target_providers:
+            if not await self._ensure_provider_available(provider_id):
+                continue
             provider = self.providers.get(provider_id)
             if not provider:
                 continue
-            if not provider.is_available():
-                continue
 
             try:
-                evidence = provider.retrieve(query=query, top_k=top_k, filters=filters)
+                evidence = await provider.retrieve(query=query, top_k=top_k, filters=filters)
                 if evidence:
                     # Mark retrieval time
                     retrieval_time = datetime.utcnow()
@@ -115,7 +153,7 @@ class RetrievalService:
 
         return builder.build()
 
-    def retrieve_simple(
+    async def retrieve_simple(
         self,
         query: str,
         top_k: int = 5,
@@ -140,31 +178,31 @@ class RetrievalService:
             provider_specific=provider_specific,
         )
         provider_ids = [provider] if provider else None
-        return self.retrieve(query, top_k, filters, provider_ids)
+        return await self.retrieve(query, top_k, filters, provider_ids)
 
-    def retrieve_by_source(
+    async def retrieve_by_source(
         self,
         query: str,
         source: str,
         top_k: int = 5,
     ) -> "EvidenceBundle":
-        return self.retrieve_simple(query=query, top_k=top_k, source=source)
+        return await self.retrieve_simple(query=query, top_k=top_k, source=source)
 
-    def retrieve_by_provider(
+    async def retrieve_by_provider(
         self,
         query: str,
         provider: str,
         top_k: int = 5,
     ) -> "EvidenceBundle":
-        return self.retrieve_simple(query=query, top_k=top_k, provider=provider)
+        return await self.retrieve_simple(query=query, top_k=top_k, provider=provider)
 
-    def retrieve_by_pattern(
+    async def retrieve_by_pattern(
         self,
         query: str,
         architecture_patterns: list[str],
         top_k: int = 5,
     ) -> "EvidenceBundle":
-        return self.retrieve_simple(query=query, top_k=top_k, architecture_patterns=architecture_patterns)
+        return await self.retrieve_simple(query=query, top_k=top_k, architecture_patterns=architecture_patterns)
 
     def get_provider_info(self, provider_id: str) -> Optional[dict]:
         """Get information about a specific provider."""
@@ -194,7 +232,8 @@ class LegacyRetrievalService:
         well_architected_pillars: list[str] | None = None,
         provider_specific: bool | None = None,
     ):
-        bundle = self.service.retrieve_simple(
+        import asyncio
+        bundle = asyncio.run(self.service.retrieve_simple(
             query=query,
             top_k=top_k,
             provider=provider,
@@ -205,7 +244,7 @@ class LegacyRetrievalService:
             knowledge_categories=knowledge_categories,
             well_architected_pillars=well_architected_pillars,
             provider_specific=provider_specific,
-        )
+        ))
 
         # Convert EvidenceBundle to old RetrievedChunk format for backward compat
         from dataclasses import dataclass

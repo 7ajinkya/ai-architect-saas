@@ -1,14 +1,22 @@
+import logging
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
 from ai_architect.config.settings import settings
 
 
+logger = logging.getLogger(__name__)
+
+
 def create_qdrant_client() -> QdrantClient:
-    return QdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-    )
+    # Passing an empty api_key against a local http:// URL triggers a
+    # qdrant-client "insecure connection" UserWarning, so only send a key
+    # when one is actually configured. Behavior with a real key is unchanged.
+    kwargs: dict = {"url": settings.qdrant_url}
+    if settings.qdrant_api_key:
+        kwargs["api_key"] = settings.qdrant_api_key
+    return QdrantClient(**kwargs)
 
 
 def ensure_collection(client: QdrantClient, collection_name: str | None = None, vector_size: int = 384) -> None:
@@ -21,9 +29,9 @@ def ensure_collection(client: QdrantClient, collection_name: str | None = None, 
             collection_name=name,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
-        print(f"Created collection: {name}")
+        logger.debug("Created collection: %s", name)
     else:
-        print(f"Collection already exists: {name}")
+        logger.debug("Collection already exists: %s", name)
 
 
 def get_collection_info(client: QdrantClient, collection_name: str | None = None):

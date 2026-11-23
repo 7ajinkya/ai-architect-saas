@@ -1,5 +1,7 @@
 from typing import Optional, List
 from datetime import datetime
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.documents import Document
 from qdrant_client.models import Filter, FieldCondition, MatchValue
@@ -56,7 +58,7 @@ class QdrantProvider:
             return None
         return Filter(must=conditions)
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         top_k: int = 5,
@@ -64,11 +66,18 @@ class QdrantProvider:
     ) -> List[Evidence]:
         """Retrieve evidence from Qdrant vector store."""
         qdrant_filter = self._build_qdrant_filter(filters)
-        results = self.vector_store.vector_store.similarity_search_with_score(
-            query=query,
-            k=top_k,
-            filter=qdrant_filter,
-        )
+        
+        # Run the synchronous Qdrant search in a thread pool
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            results = await loop.run_in_executor(
+                executor,
+                lambda: self.vector_store.vector_store.similarity_search_with_score(
+                    query=query,
+                    k=top_k,
+                    filter=qdrant_filter,
+                )
+            )
 
         evidence_list = []
         for doc, score in results:

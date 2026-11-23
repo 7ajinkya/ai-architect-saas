@@ -18,7 +18,9 @@ class RequirementsGraphState(TypedDict):
 def validate_requirements(
     state: RequirementsGraphState,
 ) -> dict:
-    requirements_state = state["requirements_state"]
+    requirements_state = RequirementsState.ensure(
+        state["requirements_state"]
+    )
 
     if requirements_state.extraction is None:
         raise ValueError(
@@ -44,7 +46,9 @@ def validate_requirements(
 def ask_clarification(
     state: RequirementsGraphState,
 ) -> dict:
-    requirements_state = state["requirements_state"]
+    requirements_state = RequirementsState.ensure(
+        state["requirements_state"]
+    )
 
     clarification = next(
         (
@@ -76,7 +80,9 @@ def ask_clarification(
 def apply_clarification(
     state: RequirementsGraphState,
 ) -> dict:
-    requirements_state = state["requirements_state"]
+    requirements_state = RequirementsState.ensure(
+        state["requirements_state"]
+    )
 
     clarification = next(
         (

@@ -29,6 +29,19 @@ dist/
 build/
 *.egg-info/
 
+# Frontend
+frontend/node_modules/
+frontend/.vite/
+frontend/coverage/
+.vite/
+*.tsbuildinfo
+
+# Stray root npm lockfile (the project has no root package.json)
+/package-lock.json
+
+# Local server logs
+*.log
+
 # Local runtime / databases
 *.sqlite
 *.sqlite3
@@ -37,3 +50,15 @@ build/
 # Local downloaded / generated knowledge data
 data/
 audit_sources/
+
+# Local audit scratch output (per-session dumps, not part of the app)
+audit_compare.json
+
+# Terraform runtime artifacts (generated; never commit)
+.terraform/
+*.tfplan
+terraform.tfstate*
+terraform.tfvars
+
+# Durable provisioning workspaces (var/terraform/<session>/<tree>/)
+var/

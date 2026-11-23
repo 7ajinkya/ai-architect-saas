@@ -5,13 +5,24 @@ from ai_architect.agents.capacity.result import CapacityModelingResult
 from ai_architect.agents.component_selection.models import (
     ComponentSelectionResult,
 )
+from ai_architect.domain.architecture.critique import (
+    DesignCritique,
+    QualityGateResult,
+)
 from ai_architect.domain.architecture.models import ArchitectureResult
 from ai_architect.domain.cost.models import CostEstimationResult
 from ai_architect.domain.requirements.state import RequirementsState
 
 
 class DesignStatus(str, Enum):
-    """Lifecycle of one top-level design workflow run."""
+    """Lifecycle of one top-level design workflow run.
+
+    RUNNING means the pipeline is still working (any stage before the
+    quality gate, including the critic/revision loop). READY is
+    terminal: it is written only by the quality-gate stage, so a READY
+    run always carries a stored quality-gate verdict. FAILED is
+    terminal with an error. No mid-pipeline stage may write READY.
+    """
 
     RUNNING = "running"
     READY = "ready"
@@ -35,8 +46,15 @@ class DesignGraphState(TypedDict):
     - region_code: the canonical region resolved once from the user's
       stated region, so Cost Estimation and the Composer cannot disagree
       about where the design is deployed. Empty until resolved.
+    - critique: DesignCritique for the current architecture (adversarial
+      review; never a mutation).
+    - revision_count: completed critique/revision cycles, bounded by
+      MAX_CRITIQUE_CYCLES. Separate from the composer correction retry.
+    - critic_route: routing decision made by the critic node
+      (quality_gate | composer_revision | component_selection).
+    - quality_gate: QualityGateResult verdict over the finished design.
 
-    No fields for future slices (critique, Terraform) are added here.
+    No fields for future slices (Terraform) are added here.
     """
 
     session_id: str
@@ -56,3 +74,7 @@ class DesignGraphState(TypedDict):
     # path. Never part of the public session view; the snapshot loader
     # deliberately ignores it.
     composer_diagnostics: NotRequired[list[dict] | None]
+    critique: NotRequired[DesignCritique | None]
+    revision_count: NotRequired[int]
+    critic_route: NotRequired[str]
+    quality_gate: NotRequired[QualityGateResult | None]

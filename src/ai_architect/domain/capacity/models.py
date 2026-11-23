@@ -3,10 +3,22 @@ from pydantic import BaseModel, Field
 
 class CapacityModelInput(BaseModel):
     daily_active_users: int = Field(gt=0)
-    messages_per_user_per_day: float = Field(gt=0)
+    messages_per_user_per_day: float = Field(
+        gt=0,
+        description=(
+            "WRITE-only quantity: new messages/writes per user per day. "
+            "Reads are derived separately via read_write_ratio and must "
+            "not be included here."
+        ),
+    )
 
     peak_factor: float = Field(gt=0)
-    read_write_ratio: float = Field(gt=0)
+    read_write_ratio: float = Field(
+        gt=0,
+        description=(
+            "Reads per write (e.g. 9.0 means nine reads for each write)."
+        ),
+    )
 
     average_message_size_bytes: int = Field(gt=0)
 

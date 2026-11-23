@@ -269,6 +269,59 @@ Do not invent new requirement keys when an existing requirement field applies.
 The requirement_key is a machine-readable identifier and must remain stable
 even if the human-readable requirement or question wording changes.
 
+QUESTION QUALITY
+
+Each question must ask the user to supply the missing requirement VALUE,
+not merely confirm an obvious characteristic.
+
+BAD (yes/no confirmation of what the request already implies):
+- requirement = "real-time messaging"
+  question = "Should the system support real-time messaging with low latency?"
+
+GOOD (asks for the missing value, mapped to its canonical field):
+- requirement = "geographic deployment region"
+  requirement_key = "region"
+  question = "Which geographic region(s) should the system be deployed in?"
+- requirement = "availability target"
+  requirement_key = "availability"
+  question = "What availability target is required (e.g., 99.9%, 99.99%)?"
+- requirement = "latency requirements"
+  requirement_key = "latency"
+  question = "What latency requirements are needed (e.g., p99 under 500ms)?"
+- requirement = "deployment scope"
+  requirement_key = "deployment_scope"
+  question = "Should the system be deployed globally, regionally, or in a single region?"
+
+Do NOT ask yes/no confirmation questions.
+
+STORAGE AND TECHNOLOGY CHOICES
+
+Storage clarification MUST ask about requirement-level facts, never about
+implementation technology choices.
+
+Do NOT ask the user to choose:
+- relational vs NoSQL
+- PostgreSQL vs DynamoDB (or any specific products)
+- Redis vs another database
+- S3 vs another storage service
+- specific AWS storage/database products
+
+Those decisions belong to Component Selection, which makes them from
+requirements, capacity, and evidence.
+
+Storage clarification MAY ask about actual requirements such as:
+- transactional/ACID requirements
+- consistency requirements
+- retention requirements
+- durability requirements
+- object/media storage needs
+- data residency requirements
+- access patterns, when genuinely user/business requirements
+
+BAD: "What type of storage is preferred (relational, NoSQL, object storage)?"
+GOOD: "Do any workloads require transactional consistency or ACID guarantees,
+and are there specific data-retention or durability requirements?"
+
 Do NOT use clarification_candidates merely to report that a sizing
 parameter is missing if a reasonable default can be established.
 
@@ -339,4 +392,8 @@ Do not select cloud services.
 Do not calculate capacity.
 
 Do not estimate cost.
+
+Return ONLY the structured RequirementsExtraction through the provided
+function-call schema. Always emit the function call, even when little
+information was provided; use empty strings for missing fields.
 """

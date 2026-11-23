@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -211,11 +212,11 @@ def main():
                 provider_specific=provider_specific,
             )
 
-            bundle = RetrievalService().retrieve(
+            bundle = asyncio.run(RetrievalService().retrieve(
                 query=args.query,
                 top_k=args.top_k,
                 filters=filters,
-            )
+            ))
 
             if not bundle.evidence:
                 console.print("[yellow]No results found.[/yellow]")

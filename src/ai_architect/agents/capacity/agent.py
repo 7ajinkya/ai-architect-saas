@@ -12,3 +12,9 @@ def create_capacity_modeling_agent() -> Runnable:
         CapacityModelProposal,
         method="function_calling",
     )
+
+
+def create_capacity_modeling_agent_raw() -> Runnable:
+    """Create agent without structured output for raw response."""
+    llm = create_llm(LLMProfile.MEDIUM)
+    return llm

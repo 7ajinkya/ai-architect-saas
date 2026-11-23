@@ -1,0 +1,46 @@
+from ai_architect.domain.provisioning.models import (
+    SCHEMA_VERSION,
+    SUPPORTED_PROVIDERS,
+    DiagnosticCategory,
+    InfraSpec,
+    ParameterSource,
+    PendingInput,
+    ProvisioningErrorCode,
+    ResolvedParameter,
+    ResourceInstance,
+    ResourceKind,
+    SourceArchitectureRef,
+    SpecDiagnostic,
+    SupportingResource,
+)
+from ai_architect.domain.provisioning.render import (
+    RenderDiagnostic,
+    RenderDiagnosticCategory,
+    RenderedFile,
+    RenderErrorCode,
+    RenderResult,
+    RenderStatus,
+)
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "SUPPORTED_PROVIDERS",
+    "DiagnosticCategory",
+    "InfraSpec",
+    "ParameterSource",
+    "PendingInput",
+    "ProvisioningErrorCode",
+    "RenderDiagnostic",
+    "RenderDiagnosticCategory",
+    "RenderErrorCode",
+    "RenderResult",
+    "RenderStatus",
+    "RenderedFile",
+    "ResolvedParameter",
+    "ResourceInstance",
+    "ResourceKind",
+    "SourceArchitectureRef",
+    "SpecDiagnostic",
+    "SupportingResource",
+]
+

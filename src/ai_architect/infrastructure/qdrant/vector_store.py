@@ -1,3 +1,5 @@
+import logging
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, Filter, PointStruct
 from langchain_qdrant import QdrantVectorStore
@@ -7,6 +9,9 @@ from ai_architect.config.settings import settings
 from ai_architect.infrastructure.embeddings.factory import create_embeddings
 from ai_architect.infrastructure.qdrant.client import create_qdrant_client, ensure_collection
 from ai_architect.knowledge.models import KnowledgeChunk
+
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeVectorStore:
@@ -26,7 +31,10 @@ class KnowledgeVectorStore:
 
     def index_chunks(self, chunks: list[KnowledgeChunk], skip_existing: bool = True) -> int:
         if skip_existing and self._collection_has_data():
-            print(f"Collection {self.collection_name} already has data. Skipping full re-index.")
+            logger.debug(
+                "Collection %s already has data. Skipping full re-index.",
+                self.collection_name,
+            )
             return 0
 
         points = []

@@ -54,7 +54,10 @@ from ai_architect.services.architecture.core import (
     new_artifact_id,
     resolve_capacity_value,
 )
-from ai_architect.services.architecture.validator import validate_architecture
+from ai_architect.services.architecture.validator import (
+    _normalize_component_name,
+    validate_architecture,
+)
 
 console = Console()
 
@@ -335,16 +338,144 @@ def build_component_references(component_names) -> dict[str, str]:
     return references
 
 
-def _format_component_references(references: dict[str, str]) -> str:
+def _component_categories(selection) -> dict[str, str]:
+    """Deterministic component-name -> category map from the selection.
+
+    Categories are copied from the already-validated upstream artifact;
+    nothing is inferred from names. Selected entries win over rejected
+    entries if the same name appears in both lists.
+    """
+    categories: dict[str, str] = {}
+    for comp in list(selection.selected_components) + list(
+        selection.rejected_candidates
+    ):
+        name = (comp.name or "").strip()
+        if name:
+            categories.setdefault(name, str(comp.category))
+    return categories
+
+
+def _format_component_references(
+    references: dict[str, str],
+    categories: dict[str, str] | None = None,
+) -> str:
     """Render the allowed reference vocabulary for prompts/retry text."""
     if not references:
         return "- (no components were selected)"
-    return "\n".join(
-        f"- {reference} -> {name}"
-        for name, reference in sorted(
-            references.items(), key=lambda item: item[1]
-        )
+    lines: list[str] = []
+    for name, reference in sorted(
+        references.items(), key=lambda item: item[1]
+    ):
+        category = (categories or {}).get(name)
+        suffix = f" [{category}]" if category else ""
+        lines.append(f"- {reference} -> {name}{suffix}")
+    return "\n".join(lines)
+
+
+def _composer_selection_payload(selection) -> dict:
+    """Selection JSON for the Composer with non-vocabulary prose removed.
+
+    Per-component ``alternatives`` are Component Selection's internal
+    considerations, not canonical Composer vocabulary. Leaving them in
+    the prompt invites the model to copy a service name that was never
+    selected or rejected into a reference field (the observed
+    "Amazon API Gateway REST API" failure). The upstream artifact is
+    unchanged; only this prompt view omits the field.
+    """
+    payload = selection.model_dump(mode="json")
+    for group in ("selected_components", "rejected_candidates"):
+        for comp in payload.get(group) or []:
+            if isinstance(comp, dict):
+                comp.pop("alternatives", None)
+    return payload
+
+
+def _upstream_alternative_names(selection) -> set[str]:
+    """Normalized names that appear only as upstream alternative prose."""
+    names: set[str] = set()
+    for comp in list(selection.selected_components) + list(
+        selection.rejected_candidates
+    ):
+        for alternative in getattr(comp, "alternatives", []) or []:
+            text = str(alternative or "").strip()
+            if text:
+                names.add(_normalize_component_name(text))
+    return names
+
+
+def _format_labeled_component_references(
+    selected_names: list[str],
+    rejected_names: list[str],
+    categories: dict[str, str] | None = None,
+) -> str:
+    """Render the correction-retry vocabulary with membership labeled.
+
+    Slugs are built over the combined selected+rejected list in upstream
+    order, exactly as the previous unlabeled correction rendering did,
+    so every slug is identical to before — only grouping labels are
+    added. Membership comes from the already-separated selection
+    artifacts; nothing is inferred from names.
+    """
+    combined = list(selected_names) + list(rejected_names)
+    references = build_component_references(combined)
+    selected_set = set(selected_names)
+    selected_lines: list[str] = []
+    rejected_lines: list[str] = []
+    seen: set[str] = set()
+    for name in combined:
+        if not name or not name.strip() or name in seen:
+            continue
+        seen.add(name)
+        category = (categories or {}).get(name)
+        suffix = f" [{category}]" if category else ""
+        line = f"- {references[name]} -> {name}{suffix}"
+        if name in selected_set:
+            selected_lines.append(line)
+        else:
+            rejected_lines.append(line)
+    selected_block = (
+        "\n".join(selected_lines) if selected_lines else "- (none)"
     )
+    rejected_block = (
+        "\n".join(rejected_lines) if rejected_lines else "- (none)"
+    )
+    return (
+        "Selected components (may be nodes, edges, subjects, alternatives):\n"
+        f"{selected_block}\n"
+        "Rejected components (subjects and alternatives only, never nodes):\n"
+        f"{rejected_block}"
+    )
+
+
+def _format_evidence_references(evidence_ids: list[str]) -> str:
+    """Render the authoritative evidence-ID vocabulary for prompts.
+
+    Derived only from the upstream Component Selection result; the
+    composer must reproduce these IDs exactly and never invent others.
+    """
+    cleaned = [e for e in (str(v or "").strip() for v in evidence_ids) if e]
+    if not cleaned:
+        return "- (no evidence in selection)"
+    return "\n".join(f"- {evidence_id}" for evidence_id in sorted(set(cleaned)))
+
+
+def _format_rejected_names(rejected_names: list[str]) -> str:
+    """Render rejected names for the first-attempt prompt.
+
+    Membership comes from the already-separated selection artifacts;
+    nothing is inferred from names.
+    """
+    cleaned = [n for n in (str(v or "").strip() for v in rejected_names) if n]
+    if not cleaned:
+        return "- (none)"
+    seen: set[str] = set()
+    lines: list[str] = []
+    for name in cleaned:
+        if name in seen:
+            continue
+        seen.add(name)
+        lines.append(f"- {name}")
+    return "\n".join(lines)
 
 
 class LLMArchitectureNode(BaseModel):
@@ -412,15 +543,63 @@ class LLMArchitectureEdge(BaseModel):
     model_config = ConfigDict(extra="ignore", use_enum_values=True)
 
 
-class LLMArchitectureDecision(BaseModel):
-    """LLM-facing architectural decision."""
+class LLMArchitectureAlternative(BaseModel):
+    """LLM-facing alternative: a reference to known vocabulary or generic
+    reasoning, never an arbitrary service-name string.
 
+    - ``component_ref`` names an already-selected or already-rejected
+      component (exact component name, or a selected component's
+      deterministic node-ref slug). Empty means "no specific
+      component": generic reasoning only.
+    - ``note`` is required generic architectural reasoning. It must not
+      smuggle in a provider-prefixed service name; the deterministic
+      validator still checks the rendered text as the final authority.
+    """
+
+    component_ref: str = Field(
+        default="",
+        description=(
+            "Exact selected/rejected component name, or a selected "
+            "component's node-ref slug from the Allowed components "
+            "vocabulary. Empty for generic reasoning with no component. "
+            "Never copy a name from upstream alternative/tradeoff prose."
+        ),
+    )
+    note: str = Field(
+        default="",
+        description=(
+            "Required generic explanation of the tradeoff. Must not "
+            "name a provider-prefixed service outside the vocabulary."
+        ),
+    )
+
+    model_config = ConfigDict(extra="ignore", use_enum_values=True)
+
+
+class LLMArchitectureDecision(BaseModel):
+    """LLM-facing architectural decision.
+
+    Component identity belongs in ``about_component_ref`` (closed
+    vocabulary); ``decision``/``rationale`` carry explanation only and
+    stay free-form prose under the unchanged validator.
+    """
+
+    about_component_ref: str = Field(
+        default="",
+        description=(
+            "The single selected/rejected component this decision is "
+            "about: exact component name or selected node-ref slug. "
+            "Empty for cross-cutting decisions about no one component."
+        ),
+    )
     decision: str = Field(
         default="",
         validation_alias=AliasChoices("decision", "description"),
     )
     rationale: str = Field(default="")
-    alternatives_considered: LenientStrList = Field(default_factory=list)
+    alternatives_considered: list[LLMArchitectureAlternative] = Field(
+        default_factory=list
+    )
     evidence_refs: LenientStrList = Field(default_factory=list)
 
     model_config = ConfigDict(extra="ignore", use_enum_values=True)
@@ -442,7 +621,13 @@ class ArchitectureLLMOutput(BaseModel):
     )
     data_stores: LenientStrList = Field(
         default_factory=list,
-        description="Persisting components by exact component name",
+        description=(
+            "Persisting components by exact component name. Only "
+            "components whose selected category is one of database, "
+            "storage, caching, or backup may appear here. Monitoring/"
+            "observability components (log groups, alarms, dashboards) "
+            "are never data stores, even when they retain logs."
+        ),
     )
     boundaries: LenientBoundaries = Field(default_factory=list)
     decisions: list[LLMArchitectureDecision] = Field(default_factory=list)
@@ -559,7 +744,95 @@ def normalize_architecture(
     reference_to_name = {
         reference: name for name, reference in references.items()
     }
-    allowed_vocabulary = _format_component_references(references)
+    categories = _component_categories(selection)
+    allowed_vocabulary = _format_component_references(references, categories)
+    # Normalized lookups so component names that differ only in Unicode
+    # hyphen/space characters (e.g. U+2011 NON-BREAKING HYPHEN vs U+002D
+    # HYPHEN-MINUS) still resolve to the selected component. Ambiguous
+    # normalized keys (two distinct approved names collapsing to the same
+    # key) are rejected rather than resolved arbitrarily.
+    normalized_by_name: dict[str, str] = {}
+    normalized_ambiguous: set[str] = set()
+    for name in selected_by_name:
+        key = _normalize_component_name(name)
+        if key in normalized_by_name and normalized_by_name[key] != name:
+            normalized_ambiguous.add(key)
+        normalized_by_name[key] = name
+    # Vocabulary-wide normalized lookup (selected + rejected) for
+    # reference contexts (alternatives, decision subjects). A rejected
+    # component that normalizes to a selected component's key is still
+    # ambiguous: selected wins, rejected has no normalized form.
+    normalized_vocab_by_name: dict[str, str] = {}
+    normalized_vocab_ambiguous: set[str] = set()
+    for name in list(selected_by_name) + [c.name for c in selection.rejected_candidates]:
+        if not name or not name.strip():
+            continue
+        key = _normalize_component_name(name)
+        if key in normalized_vocab_by_name and normalized_vocab_by_name[key] != name:
+            normalized_vocab_ambiguous.add(key)
+        normalized_vocab_by_name[key] = name
+    # Extended lookup for reference contexts (alternatives, decision
+    # subjects): selected slugs first, then rejected slugs that do not
+    # collide. Selected wins every collision deterministically; a
+    # colliding rejected slug simply has no slug form and still
+    # resolves by exact name. Node assignment below keeps using the
+    # selected-only maps, so a rejected reference can never become a
+    # node.
+    reference_lookup = dict(reference_to_name)
+    for comp in selection.rejected_candidates:
+        name = comp.name or ""
+        if not name.strip():
+            continue
+        slug = _slugify(name)
+        if not slug:
+            continue
+        reference_lookup.setdefault(slug, name)
+    rejected_lines = [
+        f"- {slug} -> {name}"
+        + (f" [{categories[name]}]" if name in categories else "")
+        for slug, name in sorted(reference_lookup.items())
+        if name not in selected_by_name
+    ]
+    allowed_reference_vocabulary = allowed_vocabulary
+    if rejected_lines:
+        allowed_reference_vocabulary += (
+            "\nRejected references (alternatives only, never nodes):\n"
+            + "\n".join(rejected_lines)
+        )
+    upstream_alternative_tokens = _upstream_alternative_names(selection)
+
+    def _upstream_alternative_note(token: str) -> str:
+        """Explain a reference that came from upstream alternative prose.
+
+        Per-component alternatives are not Composer vocabulary; naming
+        that explicitly keeps the failure actionable without ever
+        accepting the token or substituting a different service.
+        """
+        if _normalize_component_name(
+            str(token or "")
+        ) in upstream_alternative_tokens:
+            return (
+                " This token appears only in upstream Component Selection "
+                "alternative prose, which is descriptive and not a "
+                "component reference. Use a listed canonical component ID, "
+                "or leave the reference empty and explain the tradeoff "
+                "generically."
+            )
+        return ""
+
+    def _reference_recovery_hint(token: str) -> str:
+        """Actionable distinction between a variant and a typo.
+
+        Neither case is accepted or substituted. The message tells the
+        model how to express a legitimate configuration variant versus
+        how to correct a malformed reference.
+        """
+        return _upstream_alternative_note(token) + (
+            " If you intended a configuration variant of a selected "
+            "component, use that component's canonical ID and explain the "
+            "variant in prose; if the reference is a typo, correct it to a "
+            "listed canonical ID."
+        )
 
     def _resolve_component(token: str, context: str) -> str:
         """Resolve a component_ref or exact name to its selected name.
@@ -572,11 +845,22 @@ def normalize_architecture(
             return candidate
         if candidate in reference_to_name:
             return reference_to_name[candidate]
+        normalized = _normalize_component_name(candidate)
+        if normalized in normalized_ambiguous:
+            raise ValueError(
+                f"Architecture Composer {context} references component "
+                f"{token!r} which is ambiguous after Unicode normalization: "
+                "multiple approved components share the same normalized "
+                "name."
+            )
+        if normalized in normalized_by_name:
+            return normalized_by_name[normalized]
         raise ValueError(
             f"Architecture Composer {context} references unknown "
             f"component {token!r}: it is not in the Component Selection "
             "vocabulary. Allowed references:\n"
             f"{allowed_vocabulary}"
+            + _reference_recovery_hint(token)
         )
 
     node_id_by_component: dict[str, str] = {}
@@ -675,16 +959,114 @@ def normalize_architecture(
             resolved.append(node_id_by_component[component_name])
         return resolved
 
-    decisions = [
-        ArchitectureDecision(
-            decision=item.decision,
+    rejected_by_name = {
+        comp.name: comp for comp in selection.rejected_candidates
+    }
+
+    def _lookup_vocab_name(token: str) -> str | None:
+        """Resolve exact selected/rejected names and slugs.
+
+        Shared by decision subjects and alternatives so both fields
+        speak the same closed vocabulary. Slug collisions resolve to
+        selected components first; a colliding rejected slug has no
+        slug form and still resolves by exact name. Returns None when
+        the token names nothing known; callers fail closed.
+        """
+        candidate = (token or "").strip()
+        if not candidate:
+            return None
+        if candidate in selected_by_name or candidate in rejected_by_name:
+            return candidate
+        normalized = _normalize_component_name(candidate)
+        if normalized in normalized_vocab_ambiguous:
+            return None
+        if normalized in normalized_vocab_by_name:
+            return normalized_vocab_by_name[normalized]
+        return reference_lookup.get(candidate)
+
+    def _resolve_subject(token: str, decision_index: int) -> str | None:
+        """Resolve a decision's about_component_ref, if present.
+
+        Empty means cross-cutting: no subject, no error. A non-empty
+        token that names nothing known fails closed. The subject is a
+        label only: it creates no node, cost link, or selection entry.
+        """
+        candidate = (token or "").strip()
+        if not candidate:
+            return None
+        resolved = _lookup_vocab_name(candidate)
+        if resolved is None:
+            raise ValueError(
+                "Architecture Composer decision "
+                f"[{decision_index}] about_component_ref references "
+                f"unknown component {token!r}: it is not in the "
+                "Component Selection vocabulary. Allowed references:\n"
+                f"{allowed_reference_vocabulary}"
+                + _reference_recovery_hint(token)
+            )
+        return resolved
+
+    def _resolve_alternative(
+        alt: LLMArchitectureAlternative, decision_index: int
+    ) -> str:
+        """Deterministically render one structured alternative.
+
+        A present component_ref must resolve to an exact selected or
+        rejected component name (or a listed node-ref slug); anything
+        else fails closed without inventing or substituting a service.
+        A blank note is rejected: an alternative with nothing to say
+        carries no information. The rendered text is still checked by
+        the deterministic validator, which remains the final authority.
+        """
+        if not isinstance(alt, LLMArchitectureAlternative):
+            raise ValueError(
+                "Architecture Composer decision "
+                f"[{decision_index}] alternative must be a "
+                "{component_ref, note} object, not "
+                f"{type(alt).__name__}."
+            )
+        note = (alt.note or "").strip()
+        if not note:
+            raise ValueError(
+                "Architecture Composer decision "
+                f"[{decision_index}] alternative has an empty note; "
+                "each alternative must explain its tradeoff."
+            )
+        token = (alt.component_ref or "").strip()
+        if not token:
+            return note
+        resolved = _lookup_vocab_name(token)
+        if resolved is None:
+            raise ValueError(
+                "Architecture Composer decision "
+                f"[{decision_index}] alternative references unknown "
+                f"component {token!r}: it is not in the Component "
+                "Selection vocabulary. Allowed references:\n"
+                f"{allowed_reference_vocabulary}"
+                + _reference_recovery_hint(token)
+            )
+        return f"{resolved}: {note}"
+
+    def _render_decision(item: LLMArchitectureDecision, index: int) -> ArchitectureDecision:
+        subject = _resolve_subject(item.about_component_ref, index)
+        decision_text = (
+            f"[About: {subject}] {item.decision}"
+            if subject is not None
+            else item.decision
+        )
+        return ArchitectureDecision(
+            decision=decision_text,
             rationale=item.rationale,
-            alternatives_considered=_to_str_list(
-                item.alternatives_considered
-            ),
+            alternatives_considered=[
+                _resolve_alternative(alt, index)
+                for alt in item.alternatives_considered
+            ],
             evidence_refs=_to_str_list(item.evidence_refs),
         )
-        for item in llm_output.decisions
+
+    decisions = [
+        _render_decision(item, index)
+        for index, item in enumerate(llm_output.decisions)
     ]
 
     carried = list(selection.unresolved_tradeoffs)
@@ -785,6 +1167,9 @@ def run_architecture_composer(
     session_id: str,
     *,
     requirements_session_id: str,
+    revision_brief: str | None = None,
+    version: int = 1,
+    supersedes_artifact_id: str | None = None,
 ) -> ArchitectureResult:
     """Run the Architecture Composer worker.
 
@@ -792,8 +1177,20 @@ def run_architecture_composer(
     with the LLM over keys only, normalizes deterministically, and
     returns a validated ArchitectureResult. No retrieval occurs here;
     evidence comes only from the selection result.
+
+    ``revision_brief`` carries deterministic critic findings for a
+    bounded revision cycle: the composer revises topology within the
+    same closed-world contract (same selected set, same evidence set,
+    same validation). It can never introduce a component, so a finding
+    that faults the component set itself must be routed through
+    Component Selection instead. ``version``/``supersedes_artifact_id``
+    chain the revision onto the critiqued artifact.
     """
     provider = resolve_provider(extraction)
+    categories = _component_categories(selection)
+    selected_references = build_component_references(
+        [comp.name for comp in selection.selected_components]
+    )
 
     agent = create_architecture_composer_agent_with_raw()
 
@@ -803,18 +1200,32 @@ def run_architecture_composer(
 ## Capacity Model (deterministic - select keys, do not recalculate)
 {json.dumps(capacity.model_dump(mode="json"), indent=2)}
 
-## Component Selection (use only these components, exact names)
-{json.dumps(selection.model_dump(mode="json"), indent=2)}
+## Component Selection (descriptive upstream context)
+This JSON records why upstream components were selected or rejected.
+Its per-component `alternatives` and `tradeoffs` strings are
+descriptive prose, NOT component vocabulary. Never copy a service name
+from that prose into any component_ref field.
+{json.dumps(_composer_selection_payload(selection), indent=2)}
 
 ## Allowed components (closed world)
-These are the ONLY components you may reference. Prefer the
-component_ref in the "component_ref" field of a node and in edge
-endpoints; an exact component_name also works. Any other reference is
-rejected by deterministic validation. Do not invent, rename, or
-substitute a component.
-{_format_component_references(build_component_references(
-    [comp.name for comp in selection.selected_components]
-))}
+These are the ONLY components you may use as nodes and edge
+endpoints. Each line is
+`canonical-id -> exact-name [selected-category]`. Prefer the canonical
+ID in a node's `component_ref` and in edge endpoints; the exact
+component_name also works. Any other reference is rejected by
+deterministic validation. Do not invent, rename, or substitute a
+component.
+{_format_component_references(selected_references, categories)}
+
+## Rejected components (subjects and alternatives only, never nodes)
+{_format_rejected_names(
+    [comp.name for comp in selection.rejected_candidates]
+)}
+
+## Authoritative evidence IDs (closed world)
+ONLY these IDs may appear in evidence_refs. Reproduce each ID
+exactly. Never invent, truncate, extend, or guess an ID.
+{_format_evidence_references(list(selection.evidence_references))}
 
 ## Provider
 {provider}
@@ -828,6 +1239,20 @@ Compose the architecture from these artifacts."""
         SystemMessage(content=ARCHITECTURE_COMPOSER_SYSTEM_PROMPT),
         HumanMessage(content=user_message),
     ]
+    if revision_brief and revision_brief.strip():
+        # Bounded revision: the deterministic loop supplies critic
+        # findings verbatim. Minimal-change instruction only; the same
+        # closed-world contract and validation apply unchanged.
+        messages.append(
+            HumanMessage(
+                content=(
+                    "REVISION BRIEF (deterministic critic findings - "
+                    "address each with minimal topology changes, "
+                    "introduce no new component):\n"
+                    + revision_brief.strip()[:4000]
+                )
+            )
+        )
 
     # Function calling remains the mechanism. include_raw lets us tell apart
     # a transport flake (model answered in text, no tool call) from a genuine
@@ -876,6 +1301,8 @@ Compose the architecture from these artifacts."""
             requirements_session_id=requirements_session_id,
             design_session_id=session_id,
             provider=provider,
+            version=version,
+            supersedes_artifact_id=supersedes_artifact_id,
         )
     except ValueError as first_error:
         # Bounded correction retry (exactly one): the model sees the
@@ -884,36 +1311,73 @@ Compose the architecture from these artifacts."""
         # second failure still fails loudly with both errors.
         # The allowed vocabulary is listed explicitly: abstract rules
         # alone do not reliably stop fresh inventions on resubmission.
-        vocabulary = _format_component_references(
-            build_component_references(
-                [comp.name for comp in (
-                    list(selection.selected_components)
-                    + list(selection.rejected_candidates)
-                )]
-            )
+        vocabulary = _format_labeled_component_references(
+            [comp.name for comp in selection.selected_components],
+            [comp.name for comp in selection.rejected_candidates],
+            categories,
+        )
+        evidence_vocab = _format_evidence_references(
+            list(selection.evidence_references)
         )
         correction = (
             "Your previous output was REJECTED by deterministic "
             "validation. Produce a corrected output that fixes EVERY "
             "item below without changing anything else. Rules:\n"
             "- Remove every NUMERIC value from all text fields: no QPS "
-            "counts (never write '347 QPS'), no storage sizes, no "
+            "counts (never write '347 QPS'), no storage sizes (never "
+            "write '500 GB'), no "
             "connection counts, no prices, no availability "
-            "percentages. Bare qualitative words with no number "
-            "(throughput, load, traffic) are acceptable.\n"
+            "percentages. Capacity facts live only in capacity linkage "
+            "(capacity_keys/load_key); assumptions carry no numbers. "
+            "Bare qualitative words with no number "
+            "(throughput, load, traffic, hot working set) are acceptable.\n"
+            "- ONLY use evidence IDs from this supplied set; reproduce "
+            "each ID exactly and never invent, truncate, extend, or "
+            "guess one:\n"
+            f"{evidence_vocab}\n"
             "- Every provider-specific infrastructure service named in "
-            "decision, rationale, or alternative prose MUST be one of "
+            "decision or rationale prose MUST be one of "
             "the Allowed components listed below (exact name, or a "
             "well-known short form such as SQS, SNS, S3, DynamoDB, "
-            "Lambda, EC2, or RDS that resolves to one of them). If an "
-            "alternative is not in that list, describe it generically "
-            "(e.g. 'a managed cache') and do not name the provider or "
-            "service.\n"
+            "Lambda, EC2, or RDS that resolves to one of them).\n"
+            "- Each alternatives_considered entry MUST be an object "
+            "{\"component_ref\", \"note\"}: component_ref is an exact "
+            "Allowed component name (selected or rejected), a listed "
+            "node-ref slug, or empty; "
+            "note is required generic reasoning with no "
+            "provider-prefixed service names. A bare service-name "
+            "string is never valid. Example: {\"component_ref\": \"\", "
+            "\"note\": \"a managed cache could cut read load\"}. "
+            "Rejected references are alternatives only, never nodes.\n"
+            "- Each decision MUST carry its subject in "
+            "\"about_component_ref\": an exact Allowed component name "
+            "(selected or rejected), a listed node-ref slug, or empty "
+            "for cross-cutting "
+            "decisions. Do not encode the subject as a service name "
+            "inside decision prose.\n"
+            "- If a decision concerns an infrastructure service that "
+            "appears in NEITHER list below, set \"about_component_ref\" "
+            "to \"\" and describe it in provider-free generic words "
+            "(never name the service); an unknown service name is "
+            "rejected wherever it appears.\n"
+            "- Never copy a service name from the upstream Component "
+            "Selection per-component alternatives/tradeoffs prose into "
+            "a component_ref: that prose is descriptive, not vocabulary. "
+            "A configuration variant of a selected component (different "
+            "API style, runtime, capacity mode, or billing mode) is not "
+            "a new component; keep component_ref pointed at the selected "
+            "component or empty and explain the variant generically.\n"
+            "- data_stores may contain ONLY nodes whose category is "
+            "database, storage, caching, or backup. Never put a "
+            "monitoring/logging/observability component there, even if "
+            "it retains logs; keep it as a node connected by a control "
+            "or asynchronous edge. Do not drop a selected component to "
+            "satisfy this rule.\n"
             "- Reference nodes and edge endpoints by their component_ref "
             "from the Allowed components list. Do not introduce, rename, "
             "or substitute any component.\n"
             "- Give every node at least one capacity key.\n"
-            "Allowed components:\n"
+            "Allowed components (membership matters):\n"
             f"{vocabulary}\n"
             "Rejection reasons:\n"
             + str(first_error)[:2000]
@@ -934,6 +1398,8 @@ Compose the architecture from these artifacts."""
                 requirements_session_id=requirements_session_id,
                 design_session_id=session_id,
                 provider=provider,
+                version=version,
+                supersedes_artifact_id=supersedes_artifact_id,
             )
         except ValueError as second_error:
             diagnostics = [
